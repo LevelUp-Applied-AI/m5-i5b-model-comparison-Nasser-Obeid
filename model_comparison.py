@@ -8,6 +8,7 @@ decision memo.
 
 import pandas as pd
 import numpy as np
+import os
 from datetime import datetime
 from sklearn.model_selection import cross_validate, StratifiedKFold
 from sklearn.pipeline import Pipeline
@@ -38,8 +39,11 @@ def load_and_prepare(filepath="data/telecom_churn.csv"):
     Returns:
         Tuple of (X, y).
     """
-    # TODO: Load CSV, drop customer_id, separate X and y
-    pass
+    df = pd.read_csv(filepath)
+    df = df.drop(columns=["customer_id"])
+    X = df.drop(columns=["churned"])
+    y = df["churned"]
+    return X, y
 
 
 def build_preprocessor():
@@ -48,8 +52,10 @@ def build_preprocessor():
     Returns:
         ColumnTransformer.
     """
-    # TODO: StandardScaler for numeric, OneHotEncoder for categorical
-    pass
+    return ColumnTransformer([
+        ("num", StandardScaler(), NUMERIC_FEATURES),
+        ("cat", OneHotEncoder(handle_unknown="ignore"), CATEGORICAL_FEATURES),
+    ])
 
 
 def define_models():
@@ -58,14 +64,14 @@ def define_models():
     Returns:
         Dictionary of {name: Pipeline}.
     """
-    # TODO: Create 6 Pipelines:
-    #   1. "LogReg_default"
-    #   2. "LogReg_L1"
-    #   3. "DecisionTree"
-    #   4. "RandomForest_default"
-    #   5. "RandomForest_balanced"
-    #   6. "Dummy_baseline"
-    pass
+    return {
+        "LogReg_default": Pipeline([("pre", build_preprocessor()), ("clf", LogisticRegression(l1_ratio=0, random_state=42, max_iter=1000))]),
+        "LogReg_L1": Pipeline([("pre", build_preprocessor()), ("clf", LogisticRegression(C=0.1, l1_ratio=1.0, solver="saga", random_state=42, max_iter=1000))]),
+        "DecisionTree": Pipeline([("pre", build_preprocessor()), ("clf", DecisionTreeClassifier(max_depth=5, random_state=42))]),
+        "RandomForest_default": Pipeline([("pre", build_preprocessor()), ("clf", RandomForestClassifier(n_estimators=100, random_state=42))]),
+        "RandomForest_balanced": Pipeline([("pre", build_preprocessor()), ("clf", RandomForestClassifier(n_estimators=100, class_weight="balanced", random_state=42))]),
+        "Dummy_baseline": Pipeline([("pre", build_preprocessor()), ("clf", DummyClassifier(strategy="most_frequent", random_state=42))]),
+    }
 
 
 def evaluate_all(models, X, y, cv=5, random_state=42):
@@ -75,8 +81,26 @@ def evaluate_all(models, X, y, cv=5, random_state=42):
         DataFrame with: model, accuracy_mean, accuracy_std,
         precision_mean, recall_mean, f1_mean, pr_auc_mean.
     """
-    # TODO: Loop over models, run cross_validate with multiple scoring metrics
-    pass
+    skf = StratifiedKFold(n_splits=cv, shuffle=True, random_state=random_state)
+    scoring = {"accuracy": "accuracy", "precision": "precision",
+               "recall": "recall", "f1": "f1", "pr_auc": "average_precision"}
+    rows = []
+    for name, pipe in models.items():
+        cv_res = cross_validate(pipe, X, y, cv=skf, scoring=scoring)
+        rows.append({
+            "model": name,
+            "accuracy_mean": cv_res["test_accuracy"].mean(),
+            "accuracy_std": cv_res["test_accuracy"].std(),
+            "precision_mean": cv_res["test_precision"].mean(),
+            "precision_std": cv_res["test_precision"].std(),
+            "recall_mean": cv_res["test_recall"].mean(),
+            "recall_std": cv_res["test_recall"].std(),
+            "f1_mean": cv_res["test_f1"].mean(),
+            "f1_std": cv_res["test_f1"].std(),
+            "pr_auc_mean": cv_res["test_pr_auc"].mean(),
+            "pr_auc_std": cv_res["test_pr_auc"].std(),
+        })
+    return pd.DataFrame(rows)
 
 
 def save_results(results_df, output_dir="results"):
@@ -86,8 +110,7 @@ def save_results(results_df, output_dir="results"):
         results_df: Results DataFrame.
         output_dir: Directory for output files.
     """
-    # TODO: Save results_df to comparison_table.csv
-    pass
+    results_df.to_csv(f"{output_dir}/comparison_table.csv", index=False)
 
 
 def plot_pr_curves(models, X, y, top_n=3, output_dir="results"):
@@ -99,8 +122,22 @@ def plot_pr_curves(models, X, y, top_n=3, output_dir="results"):
         top_n: Number of top models to plot.
         output_dir: Directory for output files.
     """
-    # TODO: Train models, plot PR curves, save to pr_curves.png
-    pass
+    from sklearn.model_selection import train_test_split
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, stratify=y, random_state=42)
+    # Get top models by pr_auc from evaluate_all (re-evaluate quickly via score)
+    scores = {}
+    for name, pipe in models.items():
+        pipe.fit(X_train, y_train)
+        if hasattr(pipe, "predict_proba"):
+            scores[name] = average_precision_score(y_test, pipe.predict_proba(X_test)[:, 1])
+    top_names = sorted(scores, key=scores.get, reverse=True)[:top_n]
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    for name in top_names:
+        PrecisionRecallDisplay.from_estimator(models[name], X_test, y_test, ax=ax, name=f"{name} (AP={scores[name]:.3f})")
+    ax.set_title("Precision-Recall Curves (Top 3)")
+    fig.savefig(f"{output_dir}/pr_curves.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
 
 
 def plot_calibration(models, X, y, top_n=3, output_dir="results"):
@@ -112,8 +149,21 @@ def plot_calibration(models, X, y, top_n=3, output_dir="results"):
         top_n: Number of top models to plot.
         output_dir: Directory for output files.
     """
-    # TODO: Train models, plot calibration curves, save to calibration.png
-    pass
+    from sklearn.model_selection import train_test_split
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, stratify=y, random_state=42)
+    scores = {}
+    for name, pipe in models.items():
+        pipe.fit(X_train, y_train)
+        if hasattr(pipe, "predict_proba"):
+            scores[name] = average_precision_score(y_test, pipe.predict_proba(X_test)[:, 1])
+    top_names = sorted(scores, key=scores.get, reverse=True)[:top_n]
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    for name in top_names:
+        CalibrationDisplay.from_estimator(models[name], X_test, y_test, n_bins=10, ax=ax, name=name)
+    ax.set_title("Calibration Curves (Top 3)")
+    fig.savefig(f"{output_dir}/calibration.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
 
 
 def save_best_model(models, results_df, X, y, output_dir="results"):
@@ -125,8 +175,11 @@ def save_best_model(models, results_df, X, y, output_dir="results"):
         X, y: Full dataset for final training.
         output_dir: Directory for output files.
     """
-    # TODO: Identify best model from results, train on full data, save with joblib
-    pass
+    best_name = results_df.loc[results_df["pr_auc_mean"].idxmax(), "model"]
+    best_pipe = models[best_name]
+    best_pipe.fit(X, y)
+    dump(best_pipe, f"{output_dir}/best_model.joblib")
+    print(f"Best model: {best_name}")
 
 
 def log_experiment(results_df, output_dir="results"):
@@ -136,12 +189,17 @@ def log_experiment(results_df, output_dir="results"):
         results_df: Results DataFrame.
         output_dir: Directory for output files.
     """
-    # TODO: Add timestamp column and save to experiment_log.csv
-    pass
+    log = results_df[["model"]].copy()
+    log = log.rename(columns={"model": "model_name"})
+    log["hyperparams"] = ""
+    for col in ["accuracy_mean", "precision_mean", "recall_mean", "f1_mean", "pr_auc_mean"]:
+        log[col.replace("_mean", "")] = results_df[col]
+    log["timestamp"] = datetime.now().isoformat()
+    path = f"{output_dir}/experiment_log.csv"
+    log.to_csv(path, mode="a", header=not os.path.exists(path), index=False)
 
 
 if __name__ == "__main__":
-    import os
     os.makedirs("results", exist_ok=True)
 
     data = load_and_prepare()
